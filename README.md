@@ -40,8 +40,9 @@ flowchart LR
 
 ### 1. S3 static website bucket
 
-- Bucket: `static-site-server-coderco`
+- Bucket: `static-site-server-coderco` (us-west-2)
 - Static website hosting enabled. Index document `index.html`, error document `err.html`
+- Versioning enabled, so every upload gets its own `x-amz-version-id` and older versions can be restored
 - Block Public Access turned off at the bucket level so a public-read policy could be attached
 - Bucket policy allows public `s3:GetObject` only. No listing, writing, or deleting.
 
@@ -116,17 +117,67 @@ dig -x 18.65.238.61 +short
 # server-18-65-238-61.<pop>.r.cloudfront.net.
 ```
 
-**Cache invalidation test**
+---
+
+## Cache invalidation: proof with real headers
+
+Version 2 was uploaded to S3 while CloudFront still had Version 1 cached. The edge kept serving the old copy until the cache was invalidated.
+
+| # | Action | Page shows | `x-cache` | `Age` |
+|---|---|---|---|---|
+| 1 | Load site | Version 1 | Hit | 68370 |
+| 2 | Upload Version 2 to S3 | — | — | — |
+| 3 | Reload | **Version 1 (stale)** | Hit | 68753 |
+| 4 | `create-invalidation --paths "/*"` | — | — | — |
+| 5 | Reload | **Version 2** | **Miss** | *(none)* |
+| 6 | Reload | Version 2 | Hit | 136 |
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/01-hit-v1-from-cache.png" alt="Version 1 served from cache"><br><b>1. Hit:</b> Version 1 served from the edge cache</td>
+    <td width="50%"><img src="docs/screenshots/02-upload-v2-to-s3.png" alt="Version 2 uploaded to S3"><br><b>2. Origin updated:</b> Version 2 uploaded to S3</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/03-stale-v1-still-served.png" alt="Stale Version 1 still served"><br><b>3. Stale:</b> edge still serves Version 1, same ETag, older Age</td>
+    <td width="50%"><img src="docs/screenshots/04-create-invalidation.png" alt="Invalidation created"><br><b>4. Invalidate:</b> <code>/*</code> marked expired at every edge location</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/05-miss-v2-from-origin.png" alt="Miss, Version 2 from origin"><br><b>5. Miss:</b> edge fetches Version 2 from S3 (no Age, new ETag)</td>
+    <td width="50%"><img src="docs/screenshots/06-hit-v2-cached-again.png" alt="Version 2 cached"><br><b>6. Hit:</b> Version 2 now served from the cache</td>
+  </tr>
+</table>
+
+Step-by-step breakdown of every header: **[docs/cache-invalidation-walkthrough.md](docs/cache-invalidation-walkthrough.md)**
+
+---
+
+## Deploying changes
+
 ```bash
-# 1. Change index.html ("Version 1" → "Version 2") and upload
-aws s3 cp index.html s3://static-site-server-coderco/index.html
+export DIST_ID=<your-distribution-id>
+./scripts/deploy.sh
+```
 
-# 2. Refresh: still "Version 1", because CloudFront serves the cached copy
+The script syncs `site/` to the bucket (`aws s3 sync --delete`) and invalidates `/*`, so every deploy is visible immediately.
 
-# 3. Invalidate the cache
-aws cloudfront create-invalidation --distribution-id <DIST_ID> --paths "/*"
+---
 
-# 4. Refresh: "Version 2" (Miss, then Hit)
+## Repository structure
+
+```
+.
+├── README.md
+├── site/                       # website files deployed to S3
+│   ├── index.html
+│   └── err.html
+├── infra/
+│   ├── bucket-policy.json      # public-read policy (s3:GetObject only)
+│   └── route53-alias.json      # alias A record → CloudFront
+├── scripts/
+│   └── deploy.sh               # sync to S3 + invalidate CloudFront
+└── docs/
+    ├── cache-invalidation-walkthrough.md
+    └── screenshots/
 ```
 
 ---
